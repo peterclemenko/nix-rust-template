@@ -1,87 +1,62 @@
 {
-  description = "nix-rust-template";
-
-  nixConfig.bash-prompt = "[nix]λ ";
+  description = "Rust development environment";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-
-    naersk = {
-      url = "github:nmattia/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    rust-overlay = {
-      url = "github:oxalica/rust-overlay";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
-    flake-utils = {
-      url = "github:numtide/flake-utils";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, flake-utils, naersk, nixpkgs, rust-overlay }:
+  # Ensure all source files are tracked
+  nixConfig = {
+    warn-dirty = false;
+  };
+
+  outputs = { self, nixpkgs, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        overlays = [
-          rust-overlay.overlay
-          naersk.overlay
+        pkgs = nixpkgs.legacyPackages.${system};
+        libPath = with pkgs; lib.makeLibraryPath [
+          # load external libraries that you need in your rust project here
         ];
-        pkgs = import nixpkgs {
-          inherit system overlays;
-        };
-        rust = pkgs.rust-bin.stable.latest.default;
-        naersk-lib = pkgs.naersk.override {
-          cargo = pkgs.rust-bin.nightly.latest.cargo;
-          rustc = rust;
-        };
-        rust-dev = rust.override {
-          extensions = [
-            "clippy-preview"
-            "rust-src"
-            "rustc-dev"
-            "rustfmt-preview"
+      in
+      {
+        devShells.default = pkgs.mkShell rec {
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = with pkgs; [
+            clang
+            llvmPackages.bintools
+            rustup
           ];
-        };
-      in rec {
-        # `nix build`
-        packages.nix-rust-template = naersk-lib.buildPackage {
-          pname = "nix-rust-template";
-          root = ./.;
-        };
-        defaultPackage = packages.nix-rust-template;
+          
+          # https://github.com/rust-lang/rust-bindgen#environment-variables
+          LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
+          
+          shellHook = ''
+            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
+            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/stable-x86_64-unknown-linux-gnu/bin/
+          '';
 
-        # `nix run` or `nix run .#app`
-        apps.app = flake-utils.lib.mkApp {
-          drv = packages.nix-rust-template;
-        };
-        defaultApp = apps.app;
+          # Add precompiled library to rustc search path
+          RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
+            # add libraries here (e.g. pkgs.libvmi)
+          ]);
+          
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs);
 
-        # `nix run .#watch`
-        apps.watch = flake-utils.lib.mkApp {
-          drv = pkgs.writeShellApplication {
-            name = "watch";
-            runtimeInputs = [
-              pkgs.cargo-watch
-              pkgs.gcc
-              rust
-            ];
-            text = ''
-              cargo-watch -w "./src/" -x "run"
-            '';
-          };
-        };
-
-        # `nix develop`
-        devShell = pkgs.mkShell {
-          buildInputs = [
-            pkgs.cargo-edit
-            pkgs.cargo-watch
-            pkgs.rust-analyzer
+          
+          # Add glibc, clang, glib, and other headers to bindgen search path
+          BINDGEN_EXTRA_CLANG_ARGS =
+          # Includes normal include path
+          (builtins.map (a: ''-I"${a}/include"'') [
+            # add dev libraries here (e.g. pkgs.libvmi.dev)
+            pkgs.glibc.dev
+          ])
+          # Includes with special directory paths
+          ++ [
+            ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
+            ''-I"${pkgs.glib.dev}/include/glib-2.0"''
+            ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
           ];
-          nativeBuildInputs = [ rust-dev ];
         };
       }
     );
