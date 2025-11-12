@@ -1,62 +1,105 @@
 {
-  description = "Rust development environment";
+  description = "nix-rust-template";
 
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-  };
-
-  # Ensure all source files are tracked
   nixConfig = {
+    bash-prompt = "[nix]λ ";
     warn-dirty = false;
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+
+    naersk = {
+      url = "github:nmattia/naersk";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    flake-utils = {
+      url = "github:numtide/flake-utils";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+
+  outputs = { self, flake-utils, naersk, nixpkgs, rust-overlay }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = nixpkgs.legacyPackages.${system};
-        libPath = with pkgs; lib.makeLibraryPath [
-          # load external libraries that you need in your rust project here
+        overlays = [
+          rust-overlay.overlays.default
+          naersk.overlays.default
         ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
+        rust = pkgs.rust-bin.stable.latest.default;
+        naersk-lib = pkgs.naersk.override {
+          cargo = pkgs.rust-bin.nightly.latest.cargo;
+          rustc = rust;
+        };
+        rust-dev = rust.override {
+          extensions = [
+            "clippy"
+            "rust-src"
+            "rustc-dev"
+            "rustfmt"
+          ];
+        };
+        cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
+        packageName = cargoToml.package.name;
       in
       {
-        devShells.default = pkgs.mkShell rec {
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = with pkgs; [
-            clang
-            llvmPackages.bintools
-            rustup
+        # `nix build`
+        packages.default = naersk-lib.buildPackage {
+          pname = packageName;
+          root = ./.;
+        };
+
+        packages.${packageName} = self.packages.${system}.default;
+
+        # `nix run` or `nix run .#app`
+        apps.default = flake-utils.lib.mkApp {
+          drv = self.packages.${system}.default;
+        };
+
+        apps.app = self.apps.${system}.default;
+
+        # `nix run .#watch`
+        apps.watch = flake-utils.lib.mkApp {
+          drv = pkgs.writeShellApplication {
+            name = "watch";
+            runtimeInputs = [
+              pkgs.cargo-watch
+              pkgs.gcc
+              rust
+            ];
+            text = ''
+              cargo-watch -w "./src/" -x "run"
+            '';
+          };
+        };
+
+        # `nix develop`
+        devShells.default = pkgs.mkShell {
+          name = packageName;
+          buildInputs = [
+            pkgs.cargo-edit
+            pkgs.cargo-watch
+            pkgs.rust-analyzer
+            pkgs.pkg-config
+            pkgs.clang
+            pkgs.llvmPackages.bintools
           ];
-          
-          # https://github.com/rust-lang/rust-bindgen#environment-variables
+          nativeBuildInputs = [ rust-dev ];
+
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
-          
+
           shellHook = ''
-            export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-            export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/stable-x86_64-unknown-linux-gnu/bin/
+            echo "Welcome to $(cargo --version | cut -d' ' -f2)"
           '';
-
-          # Add precompiled library to rustc search path
-          RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
-            # add libraries here (e.g. pkgs.libvmi)
-          ]);
-          
-          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (buildInputs ++ nativeBuildInputs);
-
-          
-          # Add glibc, clang, glib, and other headers to bindgen search path
-          BINDGEN_EXTRA_CLANG_ARGS =
-          # Includes normal include path
-          (builtins.map (a: ''-I"${a}/include"'') [
-            # add dev libraries here (e.g. pkgs.libvmi.dev)
-            pkgs.glibc.dev
-          ])
-          # Includes with special directory paths
-          ++ [
-            ''-I"${pkgs.llvmPackages_latest.libclang.lib}/lib/clang/${pkgs.llvmPackages_latest.libclang.version}/include"''
-            ''-I"${pkgs.glib.dev}/include/glib-2.0"''
-            ''-I${pkgs.glib.out}/lib/glib-2.0/include/''
-          ];
         };
       }
     );
